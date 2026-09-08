@@ -142,8 +142,28 @@ def test_channel_keeps_nan_samples_as_interval_bounds():
     # each sample owns the interval to the next sample; the last one has no successor
     assert list(ch.dt) == [1.0, 1.0, 3.0, 0.0]
     win = ch.window(1.5, 3.0)
-    assert list(win.t) == [2.0]
-    assert list(win.dt) == [1.0]  # clipped at the window end, not 3.0
+    # the NaN sample at 1 s is held into the window (as NaN); the 2 s sample is clipped at 3 s
+    assert list(win.t) == [1.5, 2.0]
+    assert list(win.dt) == [0.5, 1.0]
+    assert len(win) == 1
+
+
+def test_window_holds_last_sample_before_start():
+    ch = tcr.Channel("x", np.array([0.0, 1.0, 2.0, 3.0]), np.array([1.0, 5.0, 1.0, 1.0]))
+    # out-of-limit sample at 1 s, window starts at 1.5 s, next (safe) sample at 2 s
+    win = ch.window(1.5, 3.0)
+    assert list(win.t) == [1.5, 2.0, 3.0]
+    assert list(win.v) == [5.0, 1.0, 1.0]
+    assert list(win.dt) == [0.5, 1.0, 0.0]
+    exc = tcr.find_exceedance(win, "x", "max", 2.0)
+    assert (exc.first_time_s, exc.seconds_outside, exc.peak) == (1.5, 0.5, 5.0)
+    # a sample exactly at start_s owns the window start; nothing is held in
+    assert list(ch.window(2.0, 3.0).t) == [2.0, 3.0]
+    # a window entirely between two samples holds the earlier one for its full length
+    win = ch.window(1.2, 1.8)
+    assert list(win.t) == [1.2] and list(win.dt) == [pytest.approx(0.6)]
+    # nothing is held past the end of the data
+    assert len(ch.window(10.0, 20.0).t) == 0
 
 
 def test_exceedance_duration_excludes_invalid_gap_and_window_overrun():
@@ -370,6 +390,13 @@ def test_test_card_header_validation(tmp_path):
     path.write_text(",".join(tcr.TEST_CARD_COLUMNS + ("nz_max_g",)) + "\nTP-1,d,0,10,2.0,,,,9.0\n")
     with pytest.raises(tcr.TestCardError, match="duplicate column.*nz_max_g"):
         tcr.load_test_card(str(path))
+    path.write_text(", ".join(" %s " % c for c in tcr.TEST_CARD_COLUMNS) + "\nTP-1,d,0,10,2.0,,,\n")
+    assert tcr.load_test_card(str(path))[0].nz_max_g == 2.0  # padded header names are accepted
+    path.write_text(",".join(tcr.TEST_CARD_COLUMNS) + "\nTP-1,d,0,10,2.0,,,,surplus\n")
+    with pytest.raises(tcr.TestCardError, match="row 2: has 1 field\\(s\\) more than the header"):
+        tcr.load_test_card(str(path))
+    path.write_text(",".join(tcr.TEST_CARD_COLUMNS) + "\n,,,,,,,,,\nTP-1,d,0,10,,,,\n")
+    assert len(tcr.load_test_card(str(path))) == 1  # blank row with trailing commas is skipped
     path.write_text("")
     with pytest.raises(tcr.TestCardError, match="empty"):
         tcr.load_test_card(str(path))

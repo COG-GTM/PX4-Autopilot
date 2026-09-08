@@ -68,8 +68,11 @@ For every test point the report contains:
   outside the limit and the time of the first exceedance. Seconds outside is
   the sum of the observed intervals of the samples beyond the limit: each
   sample owns the time up to the next logged sample (valid or invalid),
-  clipped to the test-point window. Time inside invalid-data gaps and after the
-  last sample is never counted, so the figure is a lower bound.
+  clipped to the test-point window. Windows are sample-and-hold: the last
+  sample logged before `start_s` is carried in as the value held at `start_s`,
+  so an exceedance in progress when the window opens is still caught. Time
+  inside invalid-data gaps and after the last sample is never counted, so the
+  figure is a lower bound.
 
 Status is one of:
 

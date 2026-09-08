@@ -118,6 +118,7 @@ def load_test_card(path: str) -> List[TestPoint]:
         if header is None:
             raise TestCardError("test card is empty")
         header = [h.strip() for h in header]
+        reader.fieldnames = header
         missing = [c for c in TEST_CARD_COLUMNS if c not in header]
         if missing:
             raise TestCardError("test card is missing column(s): %s" % ", ".join(missing))
@@ -131,7 +132,10 @@ def load_test_card(path: str) -> List[TestPoint]:
         points: List[TestPoint] = []
         seen_ids = set()
         for row_no, raw in enumerate(reader, start=2):
-            row = {(k or "").strip(): (v or "") for k, v in raw.items()}
+            surplus = raw.pop(None, None)  # DictReader collects fields beyond the header here
+            if surplus and any(s.strip() for s in surplus):
+                raise TestCardError("row %d: has %d field(s) more than the header" % (row_no, len(surplus)))
+            row = {k: (v or "") for k, v in raw.items()}
             if all(v.strip() == "" for v in row.values()):
                 continue
 
@@ -183,6 +187,10 @@ class Channel:
     sample, i.e. the time to the next sample (valid or not), clipped to the
     window the channel was cut to. The last sample of a series has no observed
     successor and is attributed zero duration.
+
+    A window is sample-and-hold: the last sample before ``start_s`` whose
+    interval reaches into the window is carried in as the value held at
+    ``start_s`` (timestamped ``start_s``, interval clipped to the window).
     """
     name: str
     t: np.ndarray
@@ -222,8 +230,16 @@ class Channel:
         return self.t[self.valid]
 
     def window(self, start_s: float, end_s: float) -> "Channel":
-        mask = (self.t >= start_s) & (self.t <= end_s)
-        return Channel(self.name, self.t[mask], self.v[mask], self._intervals(self.t, end_s)[mask])
+        t = self.t.copy()
+        dt = self._intervals(t, end_s)
+        mask = (t >= start_s) & (t <= end_s)
+        before = np.flatnonzero(t < start_s)
+        if len(before) and before[-1] + 1 < len(t) and t[before[-1] + 1] > start_s:
+            held = before[-1]
+            mask[held] = True
+            dt[held] = max(min(t[held + 1], end_s) - start_s, 0.0)
+            t[held] = start_s
+        return Channel(self.name, t[mask], self.v[mask], dt[mask])
 
 
 @dataclass
