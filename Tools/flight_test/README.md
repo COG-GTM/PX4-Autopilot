@@ -41,16 +41,18 @@ timestamp, i.e. t = 0 in Flight Review) by default. Pass
 | Quantity | uORB topic / field | Notes |
 |---|---|---|
 | Nz [g] | `vehicle_acceleration.xyz[2]` | `-z / g0`; FRD body frame, so level 1 g flight reads +1.0 |
-| CAS [m/s] | `airspeed_validated.calibrated_airspeed_m_s` | NaN (invalid) samples are dropped |
-| Altitude [m] | `vehicle_local_position` | `ref_alt - z` (AMSL) when `z_global`, else `-z` relative to the local origin; samples with `z_valid == false` are dropped |
+| CAS [m/s] | `airspeed_validated.calibrated_airspeed_m_s` | Falls back to `indicated_airspeed_m_s` on logs from before the CAS field existed; NaN (invalid) samples are ignored |
+| Altitude [m] | `vehicle_local_position` | `ref_alt - z` (AMSL) where `z_global` is set. If the log ever has a global reference, samples without one are excluded (noted in the report header) rather than mixed into the AMSL band; a log that never has one is reported as `-z` relative to the local origin. Samples with `z_valid == false` are ignored |
 | | `vehicle_air_data.baro_alt_meter` | Fallback when `vehicle_local_position` is not logged |
 | Sink rate [m/s] | `vehicle_local_position.vz` | Down positive; `v_z_valid == false` samples dropped. Falls back to `-d/dt baro_alt_meter` |
 | Bank [deg] | `vehicle_attitude.q` | `abs(roll)` from the `[w, x, y, z]` quaternion |
 
-Only the first instance (`multi_id 0`) of each topic is used. When a topic is
-absent from the log the affected metrics are reported as `not logged` and any
-limit depending on them is listed as not evaluated. When the topic exists but
-has no samples inside a test-point window the metric reads `no data`.
+The lowest logged instance of each topic is used (normally `multi_id 0`); if
+instance 0 is missing the instance used is disclosed in the report header. When
+a topic is absent from the log the affected metrics are reported as
+`not logged` and any limit depending on them is listed as not evaluated. When
+the topic exists but has no valid samples inside a test-point window the metric
+reads `no data`.
 
 ## Per-Test-Point Results
 
@@ -63,12 +65,17 @@ For every test point the report contains:
 - max sink rate
 - duration flown: overlap between the card window and the logged data span
 - every limit exceedance with the limit, the peak value, the seconds spent
-  outside the limit (sum of sample intervals) and the time of the first
-  exceedance
+  outside the limit and the time of the first exceedance. Seconds outside is
+  the sum of the observed intervals of the samples beyond the limit: each
+  sample owns the time up to the next logged sample (valid or invalid),
+  clipped to the test-point window. Time inside invalid-data gaps and after the
+  last sample is never counted, so the figure is a lower bound.
 
 Status is one of:
 
-- `COMPLETE` – data present in the window, no limit exceeded
+- `COMPLETE` – data present in the window, no evaluated limit exceeded. A
+  limit whose source topic is `not logged` / has `no data` is not evaluated;
+  this is listed in the test point's notes and does not change the status
 - `COMPLETE WITH EXCEEDANCE` – at least one limit exceeded
 - `NO DATA` – no samples from any topic inside the window (e.g. test point
   not flown or log ended early)

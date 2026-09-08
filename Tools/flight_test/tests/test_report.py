@@ -134,11 +134,72 @@ def test_air_data_fallback_when_local_position_missing(tmp_path):
     assert np.max(fd.vz_down_mps.v) == pytest.approx(10.0, abs=0.1)
 
 
-def test_channel_drops_nan_samples():
-    ch = tcr.Channel("x", np.array([0.0, 1.0, 2.0]), np.array([1.0, np.nan, 3.0]))
-    assert len(ch) == 2
-    assert list(ch.v) == [1.0, 3.0]
-    assert list(ch.sample_durations()) == [2.0, 2.0]
+def test_channel_keeps_nan_samples_as_interval_bounds():
+    ch = tcr.Channel("x", np.array([0.0, 1.0, 2.0, 5.0]), np.array([1.0, np.nan, 3.0, 4.0]))
+    assert len(ch) == 3
+    assert list(ch.values) == [1.0, 3.0, 4.0]
+    assert list(ch.times) == [0.0, 2.0, 5.0]
+    # each sample owns the interval to the next sample; the last one has no successor
+    assert list(ch.dt) == [1.0, 1.0, 3.0, 0.0]
+    win = ch.window(1.5, 3.0)
+    assert list(win.t) == [2.0]
+    assert list(win.dt) == [1.0]  # clipped at the window end, not 3.0
+
+
+def test_exceedance_duration_excludes_invalid_gap_and_window_overrun():
+    # outside sample at 1 s, then a 4 s hole of invalid data, then a valid sample
+    ch = tcr.Channel("x", np.array([0.0, 1.0, 2.0, 6.0, 7.0]), np.array([1.0, 5.0, np.nan, 1.0, 1.0]))
+    exc = tcr.find_exceedance(ch, "x", "max", 2.0)
+    assert exc.seconds_outside == pytest.approx(1.0)  # 1 s -> 2 s only, not the NaN gap
+    assert exc.first_time_s == 1.0
+    assert exc.peak == 5.0
+    # outside sample at the very end of the window: only the observed part counts
+    ch = tcr.Channel("x", np.array([0.0, 1.0, 2.0, 3.0]), np.array([1.0, 1.0, 5.0, 5.0]))
+    exc = tcr.find_exceedance(ch.window(0.0, 2.5), "x", "max", 2.0)
+    assert exc.seconds_outside == pytest.approx(0.5)
+    exc = tcr.find_exceedance(ch, "x", "max", 2.0)
+    assert exc.seconds_outside == pytest.approx(1.0)  # last sample of the log owns no interval
+
+
+def test_mixed_z_global_excludes_relative_samples(tmp_path):
+    path = tmp_path / "mixed.ulg"
+    synth.write_synthetic_ulog(str(path), keyframes=PROFILE, ref_alt_m=1000.0, z_global_from_s=20.0)
+    fd = tcr.load_flight_data(str(path))
+    assert "AMSL" in fd.alt_source
+    assert fd.alt_m.times[0] == pytest.approx(20.0)
+    assert np.min(fd.alt_m.values) == pytest.approx(400.0, abs=1e-2)
+    assert np.max(fd.alt_m.values) == pytest.approx(500.0, abs=1e-2)
+    assert any("no global altitude reference" in n for n in fd.notes)
+    r = tcr.reduce_test_point(fd, tcr.TestPoint("TP-M", "before ref", 0.0, 10.0, alt_min_m=450.0))
+    assert r.alt_min_m is None
+    assert r.metric_text("alt_min_m") == tcr.NO_DATA
+    assert r.status == tcr.STATUS_COMPLETE  # Nz/CAS/bank still evaluated
+    assert any("alt_min_m limit 450.00 not evaluated (no data)" == n for n in r.notes)
+
+
+def test_legacy_airspeed_field_is_used_when_cas_is_absent(tmp_path):
+    path = tmp_path / "legacy.ulg"
+    synth.write_synthetic_ulog(str(path), keyframes=PROFILE, legacy_airspeed=True)
+    fd = tcr.load_flight_data(str(path))
+    assert fd.cas_source == "airspeed_validated (indicated_airspeed_m_s)"
+    assert np.max(fd.cas_mps.values) == pytest.approx(30.0, abs=1e-4)
+
+
+def test_non_zero_topic_instance_is_used_and_disclosed(tmp_path):
+    path = tmp_path / "inst1.ulg"
+    synth.write_synthetic_ulog(str(path), keyframes=PROFILE, multi_id=1)
+    fd = tcr.load_flight_data(str(path))
+    assert fd.nz_g is not None
+    assert "vehicle_acceleration: instance 0 not logged, using instance 1" in fd.notes
+    assert all(t in fd.topics_present and fd.topics_present[t] for t in tcr.ULOG_TOPICS)
+
+
+@pytest.mark.skipif(not os.environ.get("PX4_REAL_ULOG"), reason="set PX4_REAL_ULOG=<flight.ulg> to run")
+def test_real_ulog_smoke(tmp_path):
+    card = tmp_path / "card.csv"
+    card.write_text(",".join(tcr.TEST_CARD_COLUMNS) + "\nTP-1,whole log,0,3600,,,,\n")
+    assert tcr.main([os.environ["PX4_REAL_ULOG"], str(card), "--out", str(tmp_path)]) == 0
+    assert (tmp_path / "report.csv").exists()
 
 
 # --- reduction ---------------------------------------------------------------
@@ -243,7 +304,8 @@ def test_find_exceedance_edge_cases():
     exc = tcr.find_exceedance(ch, "x", "max", 1.5)
     assert (exc.first_time_s, exc.seconds_outside, exc.peak) == (1.0, 2.0, 3.0)
     exc = tcr.find_exceedance(ch, "x", "min", 1.5)
-    assert (exc.first_time_s, exc.seconds_outside, exc.peak) == (0.0, 2.0, 1.0)
+    # samples at 0 s and 3 s are below the limit; the final sample owns no observed interval
+    assert (exc.first_time_s, exc.seconds_outside, exc.peak) == (0.0, 1.0, 1.0)
     assert tcr.find_exceedance(ch.window(10.0, 20.0), "x", "max", 0.0) is None
     with pytest.raises(ValueError):
         tcr.find_exceedance(ch, "x", "between", 1.0)
@@ -304,6 +366,9 @@ def test_test_card_header_validation(tmp_path):
         tcr.load_test_card(str(path))
     path.write_text(",".join(tcr.TEST_CARD_COLUMNS + ("pilot",)) + "\nTP-1,d,0,10,,,,,Bob\n")
     with pytest.raises(tcr.TestCardError, match="unexpected column"):
+        tcr.load_test_card(str(path))
+    path.write_text(",".join(tcr.TEST_CARD_COLUMNS + ("nz_max_g",)) + "\nTP-1,d,0,10,2.0,,,,9.0\n")
+    with pytest.raises(tcr.TestCardError, match="duplicate column.*nz_max_g"):
         tcr.load_test_card(str(path))
     path.write_text("")
     with pytest.raises(tcr.TestCardError, match="empty"):

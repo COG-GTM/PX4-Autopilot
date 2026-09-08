@@ -89,6 +89,9 @@ MESSAGE_FORMATS = {
     ),
 }
 
+# airspeed_validated as logged before calibrated_airspeed_m_s existed (IAS only).
+LEGACY_AIRSPEED_FORMAT = tuple(f for f in MESSAGE_FORMATS[TOPIC_AIRSPEED] if f[1] != "calibrated_airspeed_m_s")
+
 _STRUCT_CODES = {
     "int8_t": "b", "uint8_t": "B", "int16_t": "h", "uint16_t": "H", "int32_t": "i", "uint32_t": "I",
     "int64_t": "q", "uint64_t": "Q", "float": "f", "double": "d", "bool": "?", "char": "c",
@@ -221,13 +224,20 @@ def build_synthetic_ulog(keyframes: Sequence[Keyframe] = DEMO_KEYFRAMES,
                          boot_offset_s: float = 30.0,
                          rates_hz: Optional[Dict[str, float]] = None,
                          ref_alt_m: float = 0.0,
-                         z_global: bool = True) -> bytes:
+                         z_global: bool = True,
+                         z_global_from_s: Optional[float] = None,
+                         legacy_airspeed: bool = False,
+                         multi_id: int = 0) -> bytes:
     """Return the bytes of a ULog for ``keyframes``, logging only ``topics``.
 
     Timestamps are ``boot_offset_s`` plus the keyframe time, so the log's start
     timestamp (header) equals ``boot_offset_s`` and test-card times measured from
     log start equal keyframe times. Altitude in vehicle_local_position is
     encoded as ``z = ref_alt_m - alt`` when ``z_global`` else ``z = -alt``.
+    With ``z_global_from_s`` the global reference is only available from that
+    time on: earlier samples have ``z_global`` false and ``z = -alt`` (relative).
+    ``legacy_airspeed`` writes airspeed_validated without calibrated_airspeed_m_s.
+    ``multi_id`` is the uORB instance every topic is logged as.
     """
     if len(keyframes) < 2:
         raise ValueError("at least two keyframes are required")
@@ -246,9 +256,12 @@ def build_synthetic_ulog(keyframes: Sequence[Keyframe] = DEMO_KEYFRAMES,
     writer.add_info("sys_name", "PX4")
     writer.add_info("ver_sw", "synthetic")
     for topic in topics:
-        writer.add_format(topic, MESSAGE_FORMATS[topic])
+        if topic == TOPIC_AIRSPEED and legacy_airspeed:
+            writer.add_format(topic, LEGACY_AIRSPEED_FORMAT)
+        else:
+            writer.add_format(topic, MESSAGE_FORMATS[topic])
     for topic in topics:
-        writer.subscribe(topic)
+        writer.subscribe(topic, multi_id)
 
     def stamps(t: np.ndarray) -> np.ndarray:
         return boot_offset_us + np.round(t * 1e6).astype(np.int64)
@@ -265,18 +278,25 @@ def build_synthetic_ulog(keyframes: Sequence[Keyframe] = DEMO_KEYFRAMES,
         t = _sample_times(keyframes, rates[TOPIC_AIRSPEED])
         cas = _interp(t, keyframes, "cas_mps")
         for ts, c in zip(stamps(t), cas):
-            samples.append((int(ts), TOPIC_AIRSPEED, (int(ts), float(c), float(c), float(c * 1.05), 0)))
+            if legacy_airspeed:
+                samples.append((int(ts), TOPIC_AIRSPEED, (int(ts), float(c), float(c * 1.05), 0)))
+            else:
+                samples.append((int(ts), TOPIC_AIRSPEED, (int(ts), float(c), float(c), float(c * 1.05), 0)))
 
     if TOPIC_LOCAL_POS in topics:
         t = _sample_times(keyframes, rates[TOPIC_LOCAL_POS])
         alt = _interp(t, keyframes, "alt_m")
         vz_down = -np.gradient(alt, t)
-        z = (ref_alt_m - alt) if z_global else -alt
-        for ts, zi, vzi in zip(stamps(t), z, vz_down):
+        if z_global_from_s is not None:
+            is_global = t >= z_global_from_s
+        else:
+            is_global = np.full(len(t), bool(z_global))
+        z = np.where(is_global, ref_alt_m - alt, -alt)
+        for ts, zi, vzi, gi in zip(stamps(t), z, vz_down, is_global):
             samples.append((int(ts), TOPIC_LOCAL_POS, (
                 int(ts), int(ts), True, True, True, True,
                 0.0, 0.0, float(zi), 0.0, 0.0, float(vzi),
-                z_global, z_global, boot_offset_us, 47.397742, 8.545594, float(ref_alt_m))))
+                bool(gi), bool(gi), boot_offset_us, 47.397742, 8.545594, float(ref_alt_m))))
 
     if TOPIC_AIR_DATA in topics:
         t = _sample_times(keyframes, rates[TOPIC_AIR_DATA])

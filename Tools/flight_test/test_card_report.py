@@ -124,6 +124,9 @@ def load_test_card(path: str) -> List[TestPoint]:
         extra = [c for c in header if c not in TEST_CARD_COLUMNS]
         if extra:
             raise TestCardError("test card has unexpected column(s): %s" % ", ".join(extra))
+        duplicates = sorted({c for c in header if header.count(c) > 1})
+        if duplicates:
+            raise TestCardError("test card has duplicate column(s): %s" % ", ".join(duplicates))
 
         points: List[TestPoint] = []
         seen_ids = set()
@@ -173,31 +176,54 @@ def load_test_card(path: str) -> List[TestPoint]:
 
 @dataclass
 class Channel:
-    """A scalar time series. ``t`` is seconds in the report time reference."""
+    """A scalar time series. ``t`` is seconds in the report time reference.
+
+    Invalid samples (NaN) are kept so that they bound the observed interval of
+    the sample before them; ``dt`` is the observed interval attributed to each
+    sample, i.e. the time to the next sample (valid or not), clipped to the
+    window the channel was cut to. The last sample of a series has no observed
+    successor and is attributed zero duration.
+    """
     name: str
     t: np.ndarray
     v: np.ndarray
+    dt: Optional[np.ndarray] = None
 
     def __post_init__(self):
-        keep = np.isfinite(self.v)
-        self.t = np.asarray(self.t, dtype=float)[keep]
-        self.v = np.asarray(self.v, dtype=float)[keep]
+        self.t = np.asarray(self.t, dtype=float)
+        self.v = np.asarray(self.v, dtype=float)
+        if self.dt is None:
+            self.dt = self._intervals(self.t, np.inf)
+        else:
+            self.dt = np.asarray(self.dt, dtype=float)
+
+    @staticmethod
+    def _intervals(t: np.ndarray, end_s: float) -> np.ndarray:
+        if len(t) == 0:
+            return np.zeros(0)
+        following = np.append(t[1:], t[-1])
+        return np.maximum(np.minimum(following, end_s) - t, 0.0)
 
     def __len__(self) -> int:
-        return len(self.t)
+        return int(np.count_nonzero(self.valid))
+
+    @property
+    def valid(self) -> np.ndarray:
+        return np.isfinite(self.v)
+
+    @property
+    def values(self) -> np.ndarray:
+        """Valid sample values only."""
+        return self.v[self.valid]
+
+    @property
+    def times(self) -> np.ndarray:
+        """Times of valid samples only."""
+        return self.t[self.valid]
 
     def window(self, start_s: float, end_s: float) -> "Channel":
         mask = (self.t >= start_s) & (self.t <= end_s)
-        return Channel(self.name, self.t[mask], self.v[mask])
-
-    def sample_durations(self) -> np.ndarray:
-        """Duration attributed to each sample: the interval to the next sample."""
-        if len(self.t) == 0:
-            return np.zeros(0)
-        if len(self.t) == 1:
-            return np.zeros(1)
-        dt = np.diff(self.t)
-        return np.append(dt, np.median(dt))
+        return Channel(self.name, self.t[mask], self.v[mask], self._intervals(self.t, end_s)[mask])
 
 
 @dataclass
@@ -211,9 +237,11 @@ class FlightData:
     alt_m: Optional[Channel] = None
     vz_down_mps: Optional[Channel] = None
     bank_deg: Optional[Channel] = None
+    cas_source: str = NOT_LOGGED
     alt_source: str = NOT_LOGGED
     vz_source: str = NOT_LOGGED
     topics_present: Dict[str, bool] = field(default_factory=dict)
+    notes: List[str] = field(default_factory=list)
 
     def channels(self) -> List[Channel]:
         return [c for c in (self.nz_g, self.cas_mps, self.alt_m, self.vz_down_mps, self.bank_deg)
@@ -223,15 +251,25 @@ class FlightData:
         channels = [c for c in self.channels() if len(c)]
         if not channels:
             return None
-        return (min(float(c.t[0]) for c in channels), max(float(c.t[-1]) for c in channels))
+        return (min(float(c.times[0]) for c in channels), max(float(c.times[-1]) for c in channels))
 
 
-def _dataset(ulog: ULog, topic: str):
-    """Return the multi_id 0 dataset for ``topic`` (or the lowest instance), else None."""
+def _dataset(ulog: ULog, topic: str, notes: List[str]):
+    """Return the lowest multi_id instance of ``topic`` (normally 0), else None.
+
+    Appends a note when the instance used is not 0 so the report discloses it.
+    """
     candidates = [d for d in ulog.data_list if d.name == topic]
     if not candidates:
         return None
-    return min(candidates, key=lambda d: d.multi_id)
+    chosen = min(candidates, key=lambda d: d.multi_id)
+    if chosen.multi_id != 0:
+        notes.append("%s: instance 0 not logged, using instance %d" % (topic, chosen.multi_id))
+    return chosen
+
+
+def _has_field(dataset, name: str) -> bool:
+    return any(f.field_name == name for f in dataset.field_data)
 
 
 def quaternion_to_roll_deg(q: np.ndarray) -> np.ndarray:
@@ -253,29 +291,43 @@ def load_flight_data(ulog_path: str, time_origin: str = "log") -> FlightData:
     def seconds(ds) -> np.ndarray:
         return (ds.data["timestamp"].astype(np.int64) - t0_us) / 1e6
 
-    accel = _dataset(ulog, TOPIC_ACCEL)
+    accel = _dataset(ulog, TOPIC_ACCEL, fd.notes)
     fd.topics_present[TOPIC_ACCEL] = accel is not None
     if accel is not None:
         # xyz is specific force in the FRD body frame; level 1 g flight reads z = -g0.
         fd.nz_g = Channel("nz_g", seconds(accel), -accel.data["xyz[2]"] / G0)
 
-    airspeed = _dataset(ulog, TOPIC_AIRSPEED)
+    airspeed = _dataset(ulog, TOPIC_AIRSPEED, fd.notes)
     fd.topics_present[TOPIC_AIRSPEED] = airspeed is not None
     if airspeed is not None:
-        fd.cas_mps = Channel("cas_mps", seconds(airspeed), airspeed.data["calibrated_airspeed_m_s"])
+        # Logs from before the IAS/CAS rename only carry indicated_airspeed_m_s.
+        cas_field = "calibrated_airspeed_m_s"
+        if not _has_field(airspeed, cas_field):
+            cas_field = "indicated_airspeed_m_s"
+        fd.cas_mps = Channel("cas_mps", seconds(airspeed), airspeed.data[cas_field])
+        fd.cas_source = "%s (%s)" % (TOPIC_AIRSPEED, cas_field)
 
-    local_pos = _dataset(ulog, TOPIC_LOCAL_POS)
-    air_data = _dataset(ulog, TOPIC_AIR_DATA)
+    local_pos = _dataset(ulog, TOPIC_LOCAL_POS, fd.notes)
+    air_data = _dataset(ulog, TOPIC_AIR_DATA, fd.notes)
     fd.topics_present[TOPIC_LOCAL_POS] = local_pos is not None
     fd.topics_present[TOPIC_AIR_DATA] = air_data is not None
     if local_pos is not None:
         t = seconds(local_pos)
         z = local_pos.data["z"].astype(float)
         z_valid = local_pos.data["z_valid"].astype(bool)
-        z_global = local_pos.data["z_global"].astype(bool)
+        if _has_field(local_pos, "z_global") and _has_field(local_pos, "ref_alt"):
+            z_global = local_pos.data["z_global"].astype(bool)
+        else:
+            z_global = np.zeros(len(z), dtype=bool)
         if np.any(z_global):
-            alt = local_pos.data["ref_alt"].astype(float) - z
+            # ref_alt is only meaningful while z_global is set; samples without a
+            # global reference are excluded rather than mixed into the AMSL band.
+            alt = np.where(z_global, local_pos.data["ref_alt"].astype(float) - z, np.nan)
             fd.alt_source = "%s (ref_alt - z, AMSL)" % TOPIC_LOCAL_POS
+            n_relative = int(np.count_nonzero(~z_global))
+            if n_relative:
+                fd.notes.append("%s: %d of %d samples have no global altitude reference (z_global false) "
+                                "and were excluded from altitude" % (TOPIC_LOCAL_POS, n_relative, len(z)))
         else:
             alt = -z
             fd.alt_source = "%s (-z, relative to local origin)" % TOPIC_LOCAL_POS
@@ -292,10 +344,10 @@ def load_flight_data(ulog_path: str, time_origin: str = "log") -> FlightData:
         fd.alt_m = Channel("alt_m", t, alt)
         fd.alt_source = "%s (baro_alt_meter, AMSL)" % TOPIC_AIR_DATA
         if len(fd.alt_m) >= 2:
-            fd.vz_down_mps = Channel("vz_down_mps", fd.alt_m.t, -np.gradient(fd.alt_m.v, fd.alt_m.t))
+            fd.vz_down_mps = Channel("vz_down_mps", fd.alt_m.times, -np.gradient(fd.alt_m.values, fd.alt_m.times))
             fd.vz_source = "%s (d/dt baro_alt_meter)" % TOPIC_AIR_DATA
 
-    attitude = _dataset(ulog, TOPIC_ATTITUDE)
+    attitude = _dataset(ulog, TOPIC_ATTITUDE, fd.notes)
     fd.topics_present[TOPIC_ATTITUDE] = attitude is not None
     if attitude is not None:
         q = np.column_stack([attitude.data["q[%d]" % i] for i in range(4)]).astype(float)
@@ -353,17 +405,19 @@ def find_exceedance(channel: Channel, parameter: str, kind: str, limit: float) -
     """Evaluate ``channel`` against ``limit``; return an Exceedance or None."""
     if len(channel) == 0:
         return None
-    if kind == "max":
-        outside = channel.v > limit
-        peak = float(np.max(channel.v))
-    elif kind == "min":
-        outside = channel.v < limit
-        peak = float(np.min(channel.v))
-    else:
-        raise ValueError("kind must be 'max' or 'min'")
+    values = channel.values
+    with np.errstate(invalid="ignore"):
+        if kind == "max":
+            outside = channel.valid & (channel.v > limit)
+            peak = float(np.max(values))
+        elif kind == "min":
+            outside = channel.valid & (channel.v < limit)
+            peak = float(np.min(values))
+        else:
+            raise ValueError("kind must be 'max' or 'min'")
     if not np.any(outside):
         return None
-    seconds_outside = float(np.sum(channel.sample_durations()[outside]))
+    seconds_outside = float(np.sum(channel.dt[outside]))
     first_time_s = float(channel.t[np.argmax(outside)])
     return Exceedance(parameter, kind, float(limit), peak, seconds_outside, first_time_s)
 
@@ -394,30 +448,30 @@ def reduce_test_point(fd: FlightData, point: TestPoint) -> TestPointResult:
     nz = windowed(fd.nz_g, ("nz_peak_g", "nz_mean_g"))
     if nz is not None:
         any_data = True
-        result.nz_peak_g = float(np.max(nz.v))
-        result.nz_mean_g = float(np.mean(nz.v))
+        result.nz_peak_g = float(np.max(nz.values))
+        result.nz_mean_g = float(np.mean(nz.values))
 
     cas = windowed(fd.cas_mps, ("airspeed_min_mps", "airspeed_max_mps"))
     if cas is not None:
         any_data = True
-        result.airspeed_min_mps = float(np.min(cas.v))
-        result.airspeed_max_mps = float(np.max(cas.v))
+        result.airspeed_min_mps = float(np.min(cas.values))
+        result.airspeed_max_mps = float(np.max(cas.values))
 
     alt = windowed(fd.alt_m, ("alt_min_m", "alt_max_m"))
     if alt is not None:
         any_data = True
-        result.alt_min_m = float(np.min(alt.v))
-        result.alt_max_m = float(np.max(alt.v))
+        result.alt_min_m = float(np.min(alt.values))
+        result.alt_max_m = float(np.max(alt.values))
 
     vz = windowed(fd.vz_down_mps, ("sink_rate_max_mps",))
     if vz is not None:
         any_data = True
-        result.sink_rate_max_mps = float(np.max(vz.v))
+        result.sink_rate_max_mps = float(np.max(vz.values))
 
     bank = windowed(fd.bank_deg, ("bank_max_deg",))
     if bank is not None:
         any_data = True
-        result.bank_max_deg = float(np.max(bank.v))
+        result.bank_max_deg = float(np.max(bank.values))
 
     checks = (
         ("nz_max_g", nz, "Nz [g]", "max", "nz_peak_g"),
@@ -462,11 +516,14 @@ def write_report_md(results: Sequence[TestPointResult], fd: FlightData, card_pat
     lines.append("- Log: `%s`" % fd.source)
     lines.append("- Test card: `%s`" % os.path.basename(card_path))
     lines.append("- Time reference: seconds since %s" % ("log start" if fd.time_origin == "log" else "boot"))
+    lines.append("- Airspeed source: %s" % fd.cas_source)
     lines.append("- Altitude source: %s" % fd.alt_source)
     lines.append("- Vertical speed source: %s" % fd.vz_source)
     absent = [t for t in ULOG_TOPICS if not fd.topics_present.get(t, False)]
     if absent:
         lines.append("- Topics not logged: %s" % ", ".join("`%s`" % t for t in absent))
+    for note in fd.notes:
+        lines.append("- Note: %s" % note)
     lines.append("")
     lines.append("## Summary")
     lines.append("")
