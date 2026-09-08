@@ -1,0 +1,7 @@
+test_point_id,description,start_s,end_s,nz_max_g,airspeed_max_mps,alt_min_m,alt_max_m
+TP-01,Level trim shot 22 m/s,20,40,1.5,30,450,550
+TP-02,Symmetric pull-up to 2.5 g,45,60,2.5,32,450,600
+TP-03,45 deg bank level turn,65,90,2.0,30,450,550
+TP-04,Vne dive and recovery,95,120,3.0,35,450,650
+TP-05,Stall series (not flown),200,220,1.5,25,400,600
+TP-06,Free play (no limits),0,20,,,,
