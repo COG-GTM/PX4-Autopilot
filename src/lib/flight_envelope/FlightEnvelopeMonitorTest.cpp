@@ -281,6 +281,47 @@ TEST_F(EnvelopeChannelTest, invalidSamplesHoldState)
 	EXPECT_FALSE(_upper.valid());
 }
 
+TEST_F(EnvelopeChannelTest, repeatedSamplesDoNotCountTowardsDebounce)
+{
+	_upper.setDebounceTime(DEBOUNCE_US);
+	feed(_upper, 1.0f, 2);
+
+	// one fresh outlier re-evaluated as a stale value for longer than the debounce time does not latch
+	_time += STEP_US;
+	EXPECT_FALSE(_upper.update(3.3f, _time, true));
+
+	for (int i = 0; i < 30; i++) {
+		_time += STEP_US;
+		EXPECT_FALSE(_upper.update(3.3f, _time, false));
+	}
+
+	EXPECT_EQ(_upper.state(), State::NOMINAL);
+	EXPECT_TRUE(_upper.valid());
+
+	// a second fresh outlier after the debounce time completes the transition
+	_time += STEP_US;
+	EXPECT_TRUE(_upper.update(3.3f, _time, true));
+	EXPECT_EQ(_upper.state(), State::WARNING);
+
+	// a fresh nominal sample cancels the pending exceedance even if the value is later repeated
+	_time += STEP_US;
+	EXPECT_FALSE(_upper.update(1.0f, _time, true));
+
+	for (int i = 0; i < 30; i++) {
+		_time += STEP_US;
+		EXPECT_FALSE(_upper.update(1.0f, _time, false));
+	}
+
+	EXPECT_EQ(_upper.state(), State::WARNING);
+
+	// stale samples keep the exceedance clock running while latched (1 fresh + 30 stale samples)
+	EXPECT_EQ(_upper.timeInExceedance(), 31 * STEP_US);
+
+	_time += STEP_US;
+	EXPECT_TRUE(_upper.update(1.0f, _time, true));
+	EXPECT_EQ(_upper.state(), State::NOMINAL);
+}
+
 TEST_F(EnvelopeChannelTest, invalidLimitsDisableChannel)
 {
 	EnvelopeChannel channel(true);
@@ -488,6 +529,60 @@ TEST_F(FlightEnvelopeMonitorTest, invalidInputs)
 	EXPECT_EQ(step(), channelBit(Channel::LOAD_FACTOR_HIGH));
 	EXPECT_EQ(_monitor.worstState(), State::CRITICAL);
 	EXPECT_FLOAT_EQ(_monitor.peakLoadFactorMax(), 5.f);
+}
+
+TEST_F(FlightEnvelopeMonitorTest, sensorOutageStopsCumulativeClock)
+{
+	step();
+
+	_inputs.load_factor = 4.1f;
+	step(1);
+	step(5);
+	EXPECT_EQ(_monitor.worstState(), State::CRITICAL);
+	EXPECT_EQ(_monitor.timeInCritical(), 5 * STEP_US);
+
+	// the source drops out: the channel holds CRITICAL but neither its own clock nor the aggregate one advances
+	// (the aggregate clock still covers the last interval that ended with valid data)
+	_inputs.load_factor = NAN;
+	step(20);
+	EXPECT_EQ(_monitor.worstState(), State::CRITICAL);
+	EXPECT_EQ(_monitor.channel(Channel::LOAD_FACTOR_HIGH).timeInExceedance(), 5 * STEP_US);
+	EXPECT_EQ(_monitor.timeInCritical(), 6 * STEP_US);
+
+	// a second channel with valid data in the same state keeps the aggregate clock running
+	_inputs.airspeed = 45.f;
+	step(1);
+	step(4);
+	EXPECT_EQ(_monitor.timeInCritical(), 10 * STEP_US);
+
+	_inputs.airspeed = 20.f;
+	step(1);
+	step(3);
+	EXPECT_EQ(_monitor.worstState(), State::CRITICAL);
+	EXPECT_EQ(_monitor.timeInCritical(), 11 * STEP_US);
+
+	// the source comes back: the clock resumes from the first interval with valid data
+	_inputs.load_factor = 4.1f;
+	step(1);
+	step(2);
+	EXPECT_EQ(_monitor.timeInCritical(), 13 * STEP_US);
+}
+
+TEST_F(FlightEnvelopeMonitorTest, staleInputsDoNotLatch)
+{
+	_monitor.setDebounceTime(DEBOUNCE_US);
+	step();
+
+	// a single fresh airspeed outlier replayed at the load factor rate for longer than the debounce
+	_inputs.airspeed = 36.f;
+	step();
+	_inputs.airspeed_fresh = false;
+	EXPECT_EQ(step(30), 0);
+	EXPECT_EQ(_monitor.channelState(Channel::AIRSPEED), State::NOMINAL);
+
+	_inputs.airspeed_fresh = true;
+	EXPECT_EQ(step(), channelBit(Channel::AIRSPEED));
+	EXPECT_EQ(_monitor.channelState(Channel::AIRSPEED), State::WARNING);
 }
 
 TEST_F(FlightEnvelopeMonitorTest, clearExceedancesKeepsFlightStatistics)

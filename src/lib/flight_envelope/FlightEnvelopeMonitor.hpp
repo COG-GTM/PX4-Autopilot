@@ -75,6 +75,13 @@ static constexpr uint8_t CHANNEL_COUNT = static_cast<uint8_t>(Channel::COUNT);
 
 static constexpr uint8_t channelBit(Channel id) { return static_cast<uint8_t>(1u << static_cast<uint8_t>(id)); }
 
+/**
+ * One set of samples. The *_fresh flags mark values that are new since the
+ * previous update; a value that is merely repeated from an earlier sample is
+ * still checked against the limits but does not count towards the debounce,
+ * so a single outlier from a slow source cannot latch a state by being
+ * re-evaluated at the rate of a faster source.
+ */
 struct Inputs {
 	uint64_t timestamp{0};		///< [us] sample time
 	float load_factor{0.f};		///< [g] normal load factor Nz, +1 in steady level flight
@@ -82,6 +89,11 @@ struct Inputs {
 	float altitude{0.f};		///< [m] altitude AMSL, NaN if unavailable
 	float vertical_speed{0.f};	///< [m/s] positive up, NaN if unavailable
 	float angle_of_attack{0.f};	///< [deg] NaN if no source is available
+	bool load_factor_fresh{true};
+	bool airspeed_fresh{true};
+	bool altitude_fresh{true};
+	bool vertical_speed_fresh{true};
+	bool angle_of_attack_fresh{true};
 };
 
 /**
@@ -112,12 +124,14 @@ public:
 	bool enabled() const { return _enabled && _limits_valid; }
 
 	/**
-	 * Feed a new sample.
+	 * Feed a sample.
 	 * @param value sample in engineering units, NaN marks the sample invalid
 	 * @param now_us sample time
+	 * @param fresh false if value is a repeat of the previous sample: the exceedance clock
+	 *              keeps running but the state and the debounce timer are left untouched
 	 * @return true if the latched state changed on this sample
 	 */
-	bool update(float value, uint64_t now_us);
+	bool update(float value, uint64_t now_us, bool fresh = true);
 
 	/** Clear state, timers and peak; limits are kept. */
 	void reset();

@@ -114,7 +114,7 @@ State EnvelopeChannel::evaluate(float value) const
 	return State::NOMINAL;
 }
 
-bool EnvelopeChannel::update(float value, uint64_t now_us)
+bool EnvelopeChannel::update(float value, uint64_t now_us, bool fresh)
 {
 	if (!enabled()) {
 		_valid = false;
@@ -140,6 +140,11 @@ bool EnvelopeChannel::update(float value, uint64_t now_us)
 
 	if (_state != State::NOMINAL) {
 		_time_in_exceedance_us += dt_us;
+	}
+
+	if (!fresh) {
+		// same sample as before: keep the exceedance clock running but do not let it count towards the debounce
+		return false;
 	}
 
 	const State candidate = evaluate(value);
@@ -215,14 +220,27 @@ uint8_t FlightEnvelopeMonitor::update(const Inputs &inputs)
 {
 	const uint64_t now_us = inputs.timestamp;
 
-	if ((_last_update_us != 0) && (now_us > _last_update_us)) {
-		const uint64_t dt_us = now_us - _last_update_us;
+	if ((_last_update_us != 0) && (now_us > _last_update_us) && (_worst_state != State::NOMINAL)) {
+		// only count the interval while a channel with valid data backs the worst state; a channel whose
+		// input dropped out holds its state but stops its own clock, so the aggregate clock stops too
+		bool supported = false;
 
-		if (_worst_state == State::WARNING) {
-			_time_in_warning_us += dt_us;
+		for (const EnvelopeChannel &channel : _channels) {
+			if ((channel.state() == _worst_state) && channel.valid()) {
+				supported = true;
+				break;
+			}
+		}
 
-		} else if (_worst_state == State::CRITICAL) {
-			_time_in_critical_us += dt_us;
+		if (supported) {
+			const uint64_t dt_us = now_us - _last_update_us;
+
+			if (_worst_state == State::WARNING) {
+				_time_in_warning_us += dt_us;
+
+			} else {
+				_time_in_critical_us += dt_us;
+			}
 		}
 	}
 
@@ -233,19 +251,19 @@ uint8_t FlightEnvelopeMonitor::update(const Inputs &inputs)
 
 	uint8_t changed = 0;
 
-	if (channel(Channel::LOAD_FACTOR_HIGH).update(inputs.load_factor, now_us)) { changed |= channelBit(Channel::LOAD_FACTOR_HIGH); }
+	if (channel(Channel::LOAD_FACTOR_HIGH).update(inputs.load_factor, now_us, inputs.load_factor_fresh)) { changed |= channelBit(Channel::LOAD_FACTOR_HIGH); }
 
-	if (channel(Channel::LOAD_FACTOR_LOW).update(inputs.load_factor, now_us)) { changed |= channelBit(Channel::LOAD_FACTOR_LOW); }
+	if (channel(Channel::LOAD_FACTOR_LOW).update(inputs.load_factor, now_us, inputs.load_factor_fresh)) { changed |= channelBit(Channel::LOAD_FACTOR_LOW); }
 
-	if (channel(Channel::AIRSPEED).update(inputs.airspeed, now_us)) { changed |= channelBit(Channel::AIRSPEED); }
+	if (channel(Channel::AIRSPEED).update(inputs.airspeed, now_us, inputs.airspeed_fresh)) { changed |= channelBit(Channel::AIRSPEED); }
 
-	if (channel(Channel::ALTITUDE_HIGH).update(inputs.altitude, now_us)) { changed |= channelBit(Channel::ALTITUDE_HIGH); }
+	if (channel(Channel::ALTITUDE_HIGH).update(inputs.altitude, now_us, inputs.altitude_fresh)) { changed |= channelBit(Channel::ALTITUDE_HIGH); }
 
-	if (channel(Channel::ALTITUDE_LOW).update(inputs.altitude, now_us)) { changed |= channelBit(Channel::ALTITUDE_LOW); }
+	if (channel(Channel::ALTITUDE_LOW).update(inputs.altitude, now_us, inputs.altitude_fresh)) { changed |= channelBit(Channel::ALTITUDE_LOW); }
 
-	if (channel(Channel::SINK_RATE).update(sink_rate, now_us)) { changed |= channelBit(Channel::SINK_RATE); }
+	if (channel(Channel::SINK_RATE).update(sink_rate, now_us, inputs.vertical_speed_fresh)) { changed |= channelBit(Channel::SINK_RATE); }
 
-	if (channel(Channel::ANGLE_OF_ATTACK).update(inputs.angle_of_attack, now_us)) { changed |= channelBit(Channel::ANGLE_OF_ATTACK); }
+	if (channel(Channel::ANGLE_OF_ATTACK).update(inputs.angle_of_attack, now_us, inputs.angle_of_attack_fresh)) { changed |= channelBit(Channel::ANGLE_OF_ATTACK); }
 
 	if (PX4_ISFINITE(inputs.load_factor)) {
 		if (!_load_factor_peak_valid) {

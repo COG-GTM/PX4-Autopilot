@@ -34,6 +34,7 @@
 #include "FlightEnvelopeMonitorModule.hpp"
 
 #include <lib/geo/geo.h>
+#include <lib/mathlib/mathlib.h>
 #include <px4_platform_common/events.h>
 #include <px4_platform_common/log.h>
 
@@ -199,47 +200,51 @@ void FlightEnvelopeMonitorModule::updateVehicleState(const hrt_abstime &now)
 void FlightEnvelopeMonitorModule::updateInputs(const hrt_abstime &now)
 {
 	vehicle_acceleration_s acceleration;
+	_inputs.load_factor_fresh = _vehicle_acceleration_sub.update(&acceleration);
 
-	if (_vehicle_acceleration_sub.update(&acceleration)) {
+	if (_inputs.load_factor_fresh) {
 		// specific force along body Z (FRD) is -1 g in steady level flight
 		_inputs.load_factor = -acceleration.xyz[2] / CONSTANTS_ONE_G;
 		_load_factor_time = acceleration.timestamp_sample;
-		_timestamp_sample = acceleration.timestamp_sample;
 	}
 
 	airspeed_validated_s airspeed;
+	_inputs.airspeed_fresh = _airspeed_validated_sub.update(&airspeed);
 
-	if (_airspeed_validated_sub.update(&airspeed)) {
+	if (_inputs.airspeed_fresh) {
 		_inputs.airspeed = airspeed.calibrated_airspeed_m_s;
 		_airspeed_time = airspeed.timestamp;
 	}
 
+	vehicle_local_position_s local_position;
+	const bool local_position_fresh = _vehicle_local_position_sub.update(&local_position);
+	_inputs.vertical_speed_fresh = local_position_fresh;
+
+	if (local_position_fresh) {
+		_inputs.vertical_speed = local_position.v_z_valid ? -local_position.vz : NAN;
+		_vertical_speed_time = local_position.timestamp_sample;
+	}
+
 	if (_param_fem_alt_src.get() == 1) {
 		vehicle_air_data_s air_data;
+		_inputs.altitude_fresh = _vehicle_air_data_sub.update(&air_data);
 
-		if (_vehicle_air_data_sub.update(&air_data)) {
+		if (_inputs.altitude_fresh) {
 			_inputs.altitude = air_data.baro_alt_meter;
 			_altitude_time = air_data.timestamp_sample;
 		}
 
-		vehicle_local_position_s local_position;
-
-		if (_vehicle_local_position_sub.update(&local_position)) {
-			_inputs.vertical_speed = local_position.v_z_valid ? -local_position.vz : NAN;
-			_vertical_speed_time = local_position.timestamp_sample;
-		}
-
 	} else {
-		vehicle_local_position_s local_position;
+		_inputs.altitude_fresh = local_position_fresh;
 
-		if (_vehicle_local_position_sub.update(&local_position)) {
+		if (local_position_fresh) {
 			_inputs.altitude = (local_position.z_valid && local_position.z_global)
 					   ? local_position.ref_alt - local_position.z : NAN;
-			_inputs.vertical_speed = local_position.v_z_valid ? -local_position.vz : NAN;
 			_altitude_time = local_position.timestamp_sample;
-			_vertical_speed_time = local_position.timestamp_sample;
 		}
 	}
+
+	_inputs.angle_of_attack_fresh = false;
 
 	if (_load_factor_time == 0 || now - _load_factor_time > INPUT_TIMEOUT) {
 		_inputs.load_factor = NAN;
@@ -256,6 +261,17 @@ void FlightEnvelopeMonitorModule::updateInputs(const hrt_abstime &now)
 	if (_vertical_speed_time == 0 || now - _vertical_speed_time > INPUT_TIMEOUT) {
 		_inputs.vertical_speed = NAN;
 	}
+
+	// newest sample among the inputs that are actually in use
+	_timestamp_sample = 0;
+
+	if (PX4_ISFINITE(_inputs.load_factor)) { _timestamp_sample = math::max(_timestamp_sample, _load_factor_time); }
+
+	if (PX4_ISFINITE(_inputs.airspeed)) { _timestamp_sample = math::max(_timestamp_sample, _airspeed_time); }
+
+	if (PX4_ISFINITE(_inputs.altitude)) { _timestamp_sample = math::max(_timestamp_sample, _altitude_time); }
+
+	if (PX4_ISFINITE(_inputs.vertical_speed)) { _timestamp_sample = math::max(_timestamp_sample, _vertical_speed_time); }
 
 	_inputs.timestamp = now;
 }
