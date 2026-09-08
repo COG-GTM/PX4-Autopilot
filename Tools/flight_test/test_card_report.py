@@ -229,6 +229,11 @@ class Channel:
         """Times of valid samples only."""
         return self.t[self.valid]
 
+    def observed_end(self) -> float:
+        """End of the last valid sample's observed interval."""
+        last = np.flatnonzero(self.valid)[-1]
+        return float(self.t[last] + self.dt[last])
+
     def window(self, start_s: float, end_s: float) -> "Channel":
         t = self.t.copy()
         dt = self._intervals(t, end_s)
@@ -264,10 +269,12 @@ class FlightData:
                 if c is not None]
 
     def data_span(self) -> Optional[Tuple[float, float]]:
+        """Observed span of valid data: first valid sample to the end of the last
+        valid sample's observed interval (its next logged sample, valid or not)."""
         channels = [c for c in self.channels() if len(c)]
         if not channels:
             return None
-        return (min(float(c.times[0]) for c in channels), max(float(c.times[-1]) for c in channels))
+        return (min(float(c.times[0]) for c in channels), max(c.observed_end() for c in channels))
 
 
 def _dataset(ulog: ULog, topic: str, notes: List[str]):

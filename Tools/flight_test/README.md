@@ -63,7 +63,9 @@ For every test point the report contains:
 - altitude band (min/max)
 - max bank angle
 - max sink rate
-- duration flown: overlap between the card window and the logged data span
+- duration flown: overlap between the card window and the observed data span
+  (first valid sample to the end of the last valid sample's interval, i.e. its
+  next logged sample; the final sample of a log owns no interval)
 - every limit exceedance with the limit, the peak value, the seconds spent
   outside the limit and the time of the first exceedance. Seconds outside is
   the sum of the observed intervals of the samples beyond the limit: each

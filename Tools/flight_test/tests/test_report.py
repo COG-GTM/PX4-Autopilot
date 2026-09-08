@@ -166,6 +166,24 @@ def test_window_holds_last_sample_before_start():
     assert len(ch.window(10.0, 20.0).t) == 0
 
 
+def test_duration_flown_matches_held_sample_interval():
+    # last valid Nz sample at 1 s, invalid successor at 3 s, then nothing; window opens at 2 s
+    fd = tcr.FlightData(source="x", time_origin="log", t0_us=0)
+    fd.nz_g = tcr.Channel("nz_g", np.array([0.0, 1.0, 3.0]), np.array([1.0, 1.5, np.nan]))
+    assert fd.nz_g.observed_end() == 3.0
+    assert fd.data_span() == (0.0, 3.0)
+    r = tcr.reduce_test_point(fd, tcr.TestPoint("TP-H", "held", 2.0, 5.0))
+    assert r.status == tcr.STATUS_COMPLETE
+    assert r.nz_peak_g == 1.5  # value held from 1 s
+    assert r.duration_flown_s == pytest.approx(1.0)  # 2 s -> 3 s, the observed part of the hold
+    # a window opening after the invalid successor sees nothing
+    r = tcr.reduce_test_point(fd, tcr.TestPoint("TP-N", "none", 3.5, 5.0))
+    assert r.status == tcr.STATUS_NO_DATA and r.duration_flown_s == 0.0
+    # the final sample of a log owns no interval
+    fd.nz_g = tcr.Channel("nz_g", np.array([0.0, 1.0]), np.array([1.0, 1.5]))
+    assert fd.data_span() == (0.0, 1.0)
+
+
 def test_exceedance_duration_excludes_invalid_gap_and_window_overrun():
     # outside sample at 1 s, then a 4 s hole of invalid data, then a valid sample
     ch = tcr.Channel("x", np.array([0.0, 1.0, 2.0, 6.0, 7.0]), np.array([1.0, 5.0, np.nan, 1.0, 1.0]))
