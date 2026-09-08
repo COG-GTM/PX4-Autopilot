@@ -43,6 +43,9 @@ STANDARD_GRAVITY_MPS2 = 9.80665
 # Moving-average length applied to barometric altitude before differentiating
 # it into a fallback sink rate; raw baro noise would otherwise dominate d/dt.
 BARO_SINK_RATE_SMOOTHING_S = 1.0
+# A sample is assumed to hold its value for at most this many median sample
+# intervals, so logging gaps are not integrated as time outside a limit.
+MAX_SAMPLE_HOLD_INTERVALS = 2.0
 
 STATUS_COMPLETE = "COMPLETE"
 STATUS_EXCEEDANCE = "COMPLETE WITH EXCEEDANCE"
@@ -226,7 +229,16 @@ def read_test_card(path: str) -> List[TestPoint]:
         unknown = [name for name in header if name not in TEST_CARD_COLUMNS]
         if unknown:
             raise TestCardError(f"test card has unknown column(s): {', '.join(unknown)}")
-        rows = [{(k or "").strip(): (v or "") for k, v in row.items()} for row in reader]
+        duplicated = sorted({name for name in header if header.count(name) > 1})
+        if duplicated:
+            raise TestCardError(f"test card has duplicate column(s): {', '.join(duplicated)}")
+        rows = []
+        for index, row in enumerate(reader):
+            surplus = row.pop(None, [])
+            if surplus or any(value is None for value in row.values()):
+                got = len(header) + len(surplus) - sum(value is None for value in row.values())
+                raise TestCardError(f"row {index + 2}: expected {len(header)} fields, got {got}")
+            rows.append({key.strip(): value for key, value in row.items()})
     return parse_test_card_rows(rows)
 
 
@@ -284,14 +296,22 @@ class FlightLog:
     def _seconds(self, dataset) -> np.ndarray:
         return (dataset.data["timestamp"].astype(np.int64) - self.start_timestamp_us) / 1e6
 
-    def _make_channel(self, key: str, source: str, t: np.ndarray, values: np.ndarray) -> Optional[Channel]:
+    def _make_channel(
+        self, key: str, source: str, t: np.ndarray, values: np.ndarray, valid: Optional[np.ndarray] = None
+    ) -> Optional[Channel]:
+        """Build a channel from finite samples that are also flagged ``valid`` (when given)."""
         values = np.asarray(values, dtype=np.float64)
-        valid = np.isfinite(values)
-        if not valid.any():
-            self.source_notes[key] = f"{source}: logged but no finite samples"
+        keep = np.isfinite(values)
+        if valid is not None:
+            keep &= valid
+        if not keep.any():
+            self.source_notes[key] = f"{source}: logged but no valid samples"
             return None
+        dropped = int(len(keep) - keep.sum())
+        if dropped:
+            source = f"{source} ({dropped} invalid sample{'s' if dropped != 1 else ''} dropped)"
         self.source_notes[key] = source
-        return Channel(key, source, t[valid], values[valid])
+        return Channel(key, source, t[keep], values[keep])
 
     def _extract(self) -> None:
         self.channels["nz_g"] = self._extract_nz()
@@ -327,17 +347,30 @@ class FlightLog:
         if local_position is not None and {"z", "z_global", "ref_alt"} <= set(local_position.data):
             t = self._seconds(local_position)
             z = local_position.data["z"].astype(np.float64)
+            z_valid = self._flag(local_position, "z_valid")
             z_global = local_position.data["z_global"].astype(bool)
-            if z_global.all():
+            if z_global.any():
+                # Only samples with a global reference are absolute altitudes; the
+                # remainder are relative to the local origin and cannot be mixed in.
                 altitude = self._make_channel(
-                    "altitude_m", "vehicle_local_position.ref_alt - z", t, local_position.data["ref_alt"] - z
+                    "altitude_m",
+                    "vehicle_local_position.ref_alt - z",
+                    t,
+                    local_position.data["ref_alt"] - z,
+                    z_valid & z_global,
                 )
-            elif not z_global.any():
+            else:
                 altitude = self._make_channel(
-                    "altitude_m", "vehicle_local_position (-z, relative to origin: no global reference)", t, -z
+                    "altitude_m", "vehicle_local_position (-z, relative to origin: no global reference)", t, -z, z_valid
                 )
             if "vz" in local_position.data:
-                sink = self._make_channel("sink_rate_mps", "vehicle_local_position.vz", t, local_position.data["vz"])
+                sink = self._make_channel(
+                    "sink_rate_mps",
+                    "vehicle_local_position.vz",
+                    t,
+                    local_position.data["vz"],
+                    self._flag(local_position, "v_z_valid"),
+                )
 
         air_data = self._dataset("vehicle_air_data")
         if air_data is not None and "baro_alt_meter" in air_data.data:
@@ -361,6 +394,13 @@ class FlightLog:
             self.source_notes.setdefault("sink_rate_mps", "vehicle_local_position and vehicle_air_data not logged")
         return altitude, sink
 
+    @staticmethod
+    def _flag(dataset, name: str) -> np.ndarray:
+        """Boolean validity field, or all-true when the log predates the field."""
+        if name in dataset.data:
+            return dataset.data[name].astype(bool)
+        return np.ones(len(dataset.data["timestamp"]), dtype=bool)
+
     def _extract_bank(self) -> Optional[Channel]:
         attitude = self._dataset("vehicle_attitude")
         if attitude is None or not {"q[0]", "q[1]", "q[2]", "q[3]"} <= set(attitude.data):
@@ -374,20 +414,32 @@ class FlightLog:
 # --------------------------------------------------------------------------- reduction
 
 
-def _sample_durations(t: np.ndarray) -> np.ndarray:
-    """Per-sample hold time; the last sample gets the median spacing."""
+def _sample_durations(t: np.ndarray, end_s: float) -> np.ndarray:
+    """
+    Time each sample is taken to represent: the spacing to the next sample,
+    capped at MAX_SAMPLE_HOLD_INTERVALS median intervals (logging gaps are not
+    integrated) and clipped so nothing is counted beyond ``end_s``.
+    """
     if len(t) == 1:
         return np.zeros(1)
     dt = np.diff(t)
-    return np.append(dt, np.median(dt))
+    nominal = float(np.median(dt))
+    hold = np.append(dt, nominal)
+    hold = np.minimum(hold, MAX_SAMPLE_HOLD_INTERVALS * nominal)
+    return np.clip(np.minimum(hold, end_s - t), 0.0, None)
 
 
-def find_exceedance(channel: Channel, limit: str, limit_value: float, bound: str) -> Optional[Exceedance]:
+def find_exceedance(
+    channel: Channel, limit: str, limit_value: float, bound: str, end_s: Optional[float] = None
+) -> Optional[Exceedance]:
+    """Exceedance of ``limit_value`` in an already-windowed channel, or None."""
     outside = channel.values > limit_value if bound == "max" else channel.values < limit_value
     if not outside.any():
         return None
+    if end_s is None:
+        end_s = float(channel.t[-1])
     peak = float(channel.values[outside].max() if bound == "max" else channel.values[outside].min())
-    seconds_outside = float(_sample_durations(channel.t)[outside].sum())
+    seconds_outside = float(_sample_durations(channel.t, end_s)[outside].sum())
     first = float(channel.t[np.argmax(outside)])
     return Exceedance(limit, limit_value, peak, seconds_outside, first)
 
@@ -437,7 +489,7 @@ def reduce_test_point(test_point: TestPoint, log: FlightLog) -> TestPointResult:
             limit_not_evaluated = True
             result.notes.append(f"limit {limit}={limit_value:g} not evaluated: no {CHANNEL_LABELS[channel_key]} data")
             continue
-        exceedance = find_exceedance(channel, limit, limit_value, bound)
+        exceedance = find_exceedance(channel, limit, limit_value, bound, test_point.end_s)
         if exceedance is not None:
             result.exceedances.append(exceedance)
 

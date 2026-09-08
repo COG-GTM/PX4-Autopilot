@@ -55,13 +55,22 @@ error rather than silently skipped.
 |---|---|---|
 | Nz | `vehicle_acceleration.xyz[2]`, FRD body z specific force, `Nz = -az / g0` | - |
 | Calibrated airspeed | `airspeed_validated.calibrated_airspeed_m_s` (NaN samples dropped) | - |
-| Altitude | `vehicle_local_position.ref_alt - z` when `z_global` is set | `vehicle_air_data.baro_alt_meter`; `-z` relative to origin if no global reference |
-| Sink rate | `vehicle_local_position.vz` (down positive) | `-d/dt vehicle_air_data.baro_alt_meter` |
+| Altitude | `vehicle_local_position.ref_alt - z` for samples with `z_valid` and `z_global` set | `vehicle_air_data.baro_alt_meter`; `-z` relative to origin if `z_global` is never set |
+| Sink rate | `vehicle_local_position.vz` (down positive) for samples with `v_z_valid` set | `-d/dt vehicle_air_data.baro_alt_meter` |
 | Bank angle | roll from `vehicle_attitude.q` | - |
 
 A topic that is absent from the log is reported as "not logged" in the data
 sources table, in the per-test-point notes, and in the `notes` column of the
 CSV; the affected statistics are left as `n/a` (Markdown) or empty (CSV).
+Samples flagged invalid by the estimator (`z_valid`, `v_z_valid`) and local
+position samples logged before a global reference existed are dropped, and the
+data sources table states how many were dropped; the barometric fallback is
+used only when no valid local position sample remains.
+
+Seconds outside a limit are integrated from the sample spacing: each sample
+outside the limit counts until the next sample, capped at twice the median
+sample interval so logging gaps are not counted, and clipped at the test
+point's `end_s`.
 
 Per test point the tool reports: peak and mean Nz, min/max calibrated
 airspeed, altitude band flown, maximum absolute bank angle, maximum sink rate,

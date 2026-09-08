@@ -5,6 +5,8 @@ import re
 import subprocess
 import sys
 
+import numpy as np
+import pyulog
 import pytest
 
 import make_synthetic_ulog as synth
@@ -121,6 +123,23 @@ def test_parse_test_card_rejects_duplicate_ids_and_bad_header(tmp_path):
     with pytest.raises(tcr.TestCardError, match="unknown column"):
         tcr.read_test_card(path)
 
+    path = write_card(tmp_path / "twice.csv", [["TP-1", "a", "0", "10", "1"]], header=list(tcr.TEST_CARD_COLUMNS[:4]) + ["nz_max_g"] * 2)
+    with pytest.raises(tcr.TestCardError, match="duplicate column"):
+        tcr.read_test_card(path)
+
+
+@pytest.mark.parametrize(
+    "row, got",
+    [
+        (["TP-1", "a", "0", "10", "1.5", "", "", "", "surplus"], 9),
+        (["TP-1", "a", "0", "10", "1.5"], 5),
+    ],
+)
+def test_parse_test_card_rejects_wrong_field_count(tmp_path, row, got):
+    path = write_card(tmp_path / "count.csv", [row])
+    with pytest.raises(tcr.TestCardError, match=f"row 2: expected 8 fields, got {got}"):
+        tcr.read_test_card(path)
+
 
 # --------------------------------------------------------------------------- synthetic log
 
@@ -207,6 +226,28 @@ def test_wind_up_turn_busts_nz_limit(flight_log):
     )
 
 
+def test_exceedance_seconds_are_clipped_to_the_window(flight_log):
+    # Window ends while still outside the limit: nothing may be counted past end_s.
+    end_s = WIND_UP_TURN.end_s - 1.0
+    tp = tcr.TestPoint("TP-04a", "partial turn", WIND_UP_TURN.start_s, end_s, nz_max_g=NZ_LIMIT_G)
+    (exceedance,) = tcr.reduce_test_point(tp, flight_log).exceedances
+    assert exceedance.first_exceedance_s == pytest.approx(EXPECTED_FIRST_EXCEEDANCE_S, abs=0.1)
+    assert exceedance.seconds_outside <= end_s - exceedance.first_exceedance_s + 1e-9
+    assert exceedance.seconds_outside == pytest.approx(end_s - exceedance.first_exceedance_s, abs=0.05)
+
+
+def test_exceedance_seconds_ignore_logging_gaps():
+    t = np.array([0.0, 1.0, 2.0, 10.0, 11.0])
+    channel = tcr.Channel("nz_g", "test", t, np.full(t.shape, 3.0))
+    # holds: 1, 1, min(8, 2*median)=2, 1, last sample clipped to end_s - t = 0
+    exceedance = tcr.find_exceedance(channel, "nz_max_g", 2.5, "max", end_s=11.0)
+    assert exceedance.seconds_outside == pytest.approx(5.0)
+    assert exceedance.first_exceedance_s == 0.0
+    # Without an explicit window end the last sample contributes nothing either.
+    assert tcr.find_exceedance(channel, "nz_max_g", 2.5, "max").seconds_outside == pytest.approx(5.0)
+    assert tcr.find_exceedance(channel, "nz_max_g", 2.5, "max", end_s=11.5).seconds_outside == pytest.approx(5.5)
+
+
 def test_min_and_max_altitude_limits(flight_log):
     tp = tcr.TestPoint("TP-05", "descent", DESCENT.start_s, DESCENT.end_s, alt_min_m=800.0, alt_max_m=1000.0)
     r = tcr.reduce_test_point(tp, flight_log)
@@ -277,6 +318,85 @@ def test_altitude_falls_back_to_baro_without_local_position(tmp_path):
     assert r.status == tcr.STATUS_COMPLETE
     assert r.sink_rate_max_mps == pytest.approx(10.0, abs=1.5)
     assert r.alt_max_flown_m == pytest.approx(1050.0, abs=5.0)
+
+
+def _load_ulog(path):
+    return pyulog.ULog(path)
+
+
+def _local_position(ulog):
+    return ulog.get_dataset("vehicle_local_position").data
+
+
+def test_invalid_local_position_samples_are_dropped(synthetic_ulog):
+    ulog = _load_ulog(synthetic_ulog)
+    lpos = _local_position(ulog)
+    t = (lpos["timestamp"] - synth.LOG_START_TIMESTAMP_US) / 1e6
+    during_descent = (t >= DESCENT.start_s) & (t <= DESCENT.end_s)
+    # Finite but stale values flagged invalid must not reach statistics or limits.
+    lpos["z"][during_descent] = -(5000.0 - synth.HOME_ALT_M)
+    lpos["z_valid"][during_descent] = 0
+    lpos["vz"][during_descent] = 99.0
+    lpos["v_z_valid"][during_descent] = 0
+    log = tcr.FlightLog(ulog)
+
+    dropped = int(during_descent.sum())
+    assert log.source_notes["altitude_m"] == f"vehicle_local_position.ref_alt - z ({dropped} invalid samples dropped)"
+    assert log.source_notes["sink_rate_mps"] == f"vehicle_local_position.vz ({dropped} invalid samples dropped)"
+
+    r = tcr.reduce_test_point(tcr.TestPoint("TP-05", "descent", DESCENT.start_s, DESCENT.end_s, alt_max_m=1150.0), log)
+    assert r.status == tcr.STATUS_NO_DATA
+    assert r.alt_max_flown_m is None
+    assert r.sink_rate_max_mps is None
+    assert r.exceedances == []
+
+    r = tcr.reduce_test_point(tcr.TestPoint("TP-03", "level", LEVEL_ACCEL.start_s, LEVEL_ACCEL.end_s, alt_max_m=1150.0), log)
+    assert r.status == tcr.STATUS_COMPLETE
+    assert r.alt_max_flown_m == pytest.approx(1100.0, abs=2.0)
+
+
+def test_all_local_position_samples_invalid_falls_back_to_baro(synthetic_ulog):
+    ulog = _load_ulog(synthetic_ulog)
+    lpos = _local_position(ulog)
+    lpos["z_valid"][:] = 0
+    lpos["v_z_valid"][:] = 0
+    log = tcr.FlightLog(ulog)
+    assert log.source_notes["altitude_m"] == "vehicle_air_data.baro_alt_meter"
+    assert log.source_notes["sink_rate_mps"].startswith("-d/dt vehicle_air_data.baro_alt_meter")
+    r = tcr.reduce_test_point(tcr.TestPoint("TP-03", "level", LEVEL_ACCEL.start_s, LEVEL_ACCEL.end_s), log)
+    assert r.alt_max_flown_m == pytest.approx(1100.0, abs=5.0)
+
+
+@pytest.mark.parametrize("with_air_data", [True, False])
+def test_z_global_becoming_true_mid_log_keeps_referenced_samples(tmp_path, with_air_data):
+    path = str(tmp_path / "late_ref.ulg")
+    synth.write_synthetic_ulog(path, skip_topics=[] if with_air_data else ["vehicle_air_data"])
+    ulog = _load_ulog(path)
+    lpos = _local_position(ulog)
+    t = (lpos["timestamp"] - synth.LOG_START_TIMESTAMP_US) / 1e6
+    before_ref = t < CLIMB.start_s
+    lpos["z_global"][before_ref] = 0
+    log = tcr.FlightLog(ulog)
+
+    assert log.source_notes["altitude_m"].startswith("vehicle_local_position.ref_alt - z (")
+    assert log.source_notes["altitude_m"].endswith("invalid samples dropped)")
+    # Absolute altitude is still available once the reference exists ...
+    r = tcr.reduce_test_point(tcr.TestPoint("TP-02", "climb", CLIMB.start_s, CLIMB.end_s, alt_max_m=1150.0), log)
+    assert r.status == tcr.STATUS_COMPLETE
+    assert r.alt_max_flown_m == pytest.approx(1100.0, abs=2.0)
+    # ... and unreferenced samples are never mixed in as if they were absolute.
+    r = tcr.reduce_test_point(tcr.TestPoint("TP-01", "trim", 0.0, CLIMB.start_s - 1.0, alt_min_m=450.0), log)
+    assert r.status == tcr.STATUS_NO_DATA
+    assert r.alt_min_flown_m is None
+
+
+def test_z_global_never_true_uses_relative_altitude(synthetic_ulog):
+    ulog = _load_ulog(synthetic_ulog)
+    _local_position(ulog)["z_global"][:] = 0
+    log = tcr.FlightLog(ulog)
+    assert log.source_notes["altitude_m"].startswith("vehicle_local_position (-z, relative to origin")
+    r = tcr.reduce_test_point(tcr.TestPoint("TP-03", "level", LEVEL_ACCEL.start_s, LEVEL_ACCEL.end_s), log)
+    assert r.alt_max_flown_m == pytest.approx(1100.0 - synth.HOME_ALT_M, abs=2.0)
 
 
 # --------------------------------------------------------------------------- outputs
