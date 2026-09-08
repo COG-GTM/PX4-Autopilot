@@ -268,6 +268,11 @@ then
 	failure_injection_manager start
 fi
 
+if param compare -s FEM_EN 1
+then
+	flight_envelope_monitor start
+fi
+
 if param greater SIM_BAT_DRAIN 0
 then
 	battery_simulator start
