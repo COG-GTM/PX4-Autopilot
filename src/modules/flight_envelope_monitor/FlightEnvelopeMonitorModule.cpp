@@ -262,16 +262,25 @@ void FlightEnvelopeMonitorModule::updateInputs(const hrt_abstime &now)
 		_inputs.vertical_speed = NAN;
 	}
 
-	// newest sample among the inputs that are actually in use
+	// newest sample among the valid inputs that feed an enabled channel
+	const auto enabled = [this](Channel id) { return _monitor.channel(id).enabled(); };
 	_timestamp_sample = 0;
 
-	if (PX4_ISFINITE(_inputs.load_factor)) { _timestamp_sample = math::max(_timestamp_sample, _load_factor_time); }
+	if (PX4_ISFINITE(_inputs.load_factor) && (enabled(Channel::LOAD_FACTOR_HIGH) || enabled(Channel::LOAD_FACTOR_LOW))) {
+		_timestamp_sample = math::max(_timestamp_sample, _load_factor_time);
+	}
 
-	if (PX4_ISFINITE(_inputs.airspeed)) { _timestamp_sample = math::max(_timestamp_sample, _airspeed_time); }
+	if (PX4_ISFINITE(_inputs.airspeed) && enabled(Channel::AIRSPEED)) {
+		_timestamp_sample = math::max(_timestamp_sample, _airspeed_time);
+	}
 
-	if (PX4_ISFINITE(_inputs.altitude)) { _timestamp_sample = math::max(_timestamp_sample, _altitude_time); }
+	if (PX4_ISFINITE(_inputs.altitude) && (enabled(Channel::ALTITUDE_HIGH) || enabled(Channel::ALTITUDE_LOW))) {
+		_timestamp_sample = math::max(_timestamp_sample, _altitude_time);
+	}
 
-	if (PX4_ISFINITE(_inputs.vertical_speed)) { _timestamp_sample = math::max(_timestamp_sample, _vertical_speed_time); }
+	if (PX4_ISFINITE(_inputs.vertical_speed) && enabled(Channel::SINK_RATE)) {
+		_timestamp_sample = math::max(_timestamp_sample, _vertical_speed_time);
+	}
 
 	_inputs.timestamp = now;
 }

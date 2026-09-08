@@ -164,7 +164,8 @@ bool EnvelopeChannel::update(float value, uint64_t now_us, bool fresh)
 		_pending_state = _state;
 
 	} else {
-		if (candidate != _pending_state) {
+		if ((candidate != _pending_state) || (now_us < _pending_since_us)) {
+			// new candidate, or time went backwards: restart the debounce
 			_pending_state = candidate;
 			_pending_since_us = now_us;
 		}

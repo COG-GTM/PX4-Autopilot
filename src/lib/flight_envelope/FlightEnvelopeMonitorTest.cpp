@@ -382,6 +382,23 @@ TEST_F(EnvelopeChannelTest, nonMonotonicTimeDoesNotAccumulate)
 	EXPECT_EQ(_upper.timeInExceedance(), STEP_US);
 }
 
+TEST_F(EnvelopeChannelTest, backwardTimeRestartsDebounce)
+{
+	_upper.setDebounceTime(DEBOUNCE_US);
+	feed(_upper, 1.0f, 2);
+
+	// pending transition, then a sample stamped before the transition started
+	feed(_upper, 3.3f, 5);
+	EXPECT_FALSE(_upper.update(3.3f, _time - 20 * STEP_US));
+	EXPECT_EQ(_upper.state(), State::NOMINAL);
+
+	// the debounce restarts from the backward sample
+	EXPECT_FALSE(_upper.update(3.3f, _time - 20 * STEP_US + DEBOUNCE_US - 1));
+	EXPECT_EQ(_upper.state(), State::NOMINAL);
+	EXPECT_TRUE(_upper.update(3.3f, _time - 20 * STEP_US + DEBOUNCE_US));
+	EXPECT_EQ(_upper.state(), State::WARNING);
+}
+
 class FlightEnvelopeMonitorTest : public ::testing::Test
 {
 public:
