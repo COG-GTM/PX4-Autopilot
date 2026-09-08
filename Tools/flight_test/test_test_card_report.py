@@ -248,6 +248,32 @@ def test_exceedance_seconds_ignore_logging_gaps():
     assert tcr.find_exceedance(channel, "nz_max_g", 2.5, "max", end_s=11.5).seconds_outside == pytest.approx(5.5)
 
 
+def test_exceedance_held_across_window_start_is_counted_from_start():
+    t = np.array([0.0, 1.0, 2.0, 3.0])
+    channel = tcr.Channel("nz_g", "test", t, np.full(t.shape, 3.0))
+    # The sample at t=0 is outside the limit and still held when the window opens at 0.5.
+    exceedance = tcr.find_exceedance(channel, "nz_max_g", 2.5, "max", start_s=0.5, end_s=3.0)
+    assert exceedance.first_exceedance_s == pytest.approx(0.5)
+    assert exceedance.seconds_outside == pytest.approx(0.5 + 1.0 + 1.0)
+
+    # A predecessor whose capped hold does not reach the window is not an exceedance.
+    t = np.array([0.0, 1.0, 2.0, 10.0, 11.0])
+    channel = tcr.Channel("nz_g", "test", t, np.array([3.0, 3.0, 3.0, 1.0, 1.0]))
+    assert tcr.find_exceedance(channel, "nz_max_g", 2.5, "max", start_s=9.5, end_s=11.0) is None
+
+
+def test_exceedance_from_full_log_matches_windowed_statistics(flight_log):
+    # Statistics come from samples inside the window; the exceedance may only add the
+    # held predecessor, so the peaks agree and nothing before start_s is reported.
+    start_s = EXPECTED_FIRST_EXCEEDANCE_S + 0.5
+    tp = tcr.TestPoint("TP-04b", "late start", start_s, ROLL_OUT.end_s, nz_max_g=NZ_LIMIT_G)
+    r = tcr.reduce_test_point(tp, flight_log)
+    (exceedance,) = r.exceedances
+    assert exceedance.first_exceedance_s == pytest.approx(start_s)
+    assert exceedance.peak_value == pytest.approx(r.nz_peak_g)
+    assert exceedance.seconds_outside == pytest.approx(EXPECTED_LAST_EXCEEDANCE_S - start_s, abs=0.1)
+
+
 def test_min_and_max_altitude_limits(flight_log):
     tp = tcr.TestPoint("TP-05", "descent", DESCENT.start_s, DESCENT.end_s, alt_min_m=800.0, alt_max_m=1000.0)
     r = tcr.reduce_test_point(tp, flight_log)
@@ -305,6 +331,20 @@ def test_window_outside_log_is_no_data(flight_log):
     assert r.exceedances == []
     assert len(r.notes) == len(tcr.CHANNEL_LABELS)
     assert all(note.endswith("no samples in window") for note in r.notes)
+
+
+def test_short_baro_log_does_not_crash_sink_rate_fallback(tmp_path):
+    path = str(tmp_path / "no_lpos.ulg")
+    synth.write_synthetic_ulog(path, skip_topics=["vehicle_local_position"])
+    ulog = pyulog.ULog(path)
+    air_data = ulog.get_dataset("vehicle_air_data")
+    air_data.data = {key: value[:3] for key, value in air_data.data.items()}
+    log = tcr.FlightLog(ulog)
+    assert log.source_notes["sink_rate_mps"].startswith("-d/dt vehicle_air_data.baro_alt_meter")
+    assert len(log.channels["sink_rate_mps"]) == 3
+
+    values = np.array([1.0, 2.0, 3.0])
+    assert tcr._moving_average(values, np.array([0.0, 0.1, 0.2]), 1.0).shape == values.shape
 
 
 def test_altitude_falls_back_to_baro_without_local_position(tmp_path):

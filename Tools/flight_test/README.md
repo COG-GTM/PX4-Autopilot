@@ -69,8 +69,9 @@ used only when no valid local position sample remains.
 
 Seconds outside a limit are integrated from the sample spacing: each sample
 outside the limit counts until the next sample, capped at twice the median
-sample interval so logging gaps are not counted, and clipped at the test
-point's `end_s`.
+sample interval so logging gaps are not counted, and clipped to the test
+point's `[start_s, end_s]`. The last sample before `start_s` is included so a
+breach already in progress when the window opens is counted from `start_s`.
 
 Per test point the tool reports: peak and mean Nz, min/max calibrated
 airspeed, altitude band flown, maximum absolute bank angle, maximum sink rate,

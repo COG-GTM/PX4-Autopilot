@@ -250,7 +250,7 @@ def _moving_average(values: np.ndarray, t: np.ndarray, window_s: float) -> np.nd
     dt = np.median(np.diff(t))
     if not np.isfinite(dt) or dt <= 0:
         return values
-    length = max(1, int(round(window_s / dt)))
+    length = min(len(values), max(1, int(round(window_s / dt))))
     if length <= 1:
         return values
     kernel = np.ones(length)
@@ -414,33 +414,52 @@ class FlightLog:
 # --------------------------------------------------------------------------- reduction
 
 
-def _sample_durations(t: np.ndarray, end_s: float) -> np.ndarray:
+def _sample_durations(t: np.ndarray, nominal_dt: float, start_s: float, end_s: float) -> np.ndarray:
     """
-    Time each sample is taken to represent: the spacing to the next sample,
-    capped at MAX_SAMPLE_HOLD_INTERVALS median intervals (logging gaps are not
-    integrated) and clipped so nothing is counted beyond ``end_s``.
+    Time each sample's value is taken to hold inside [start_s, end_s]: from the
+    sample to the next one, capped at MAX_SAMPLE_HOLD_INTERVALS nominal
+    intervals (logging gaps are not integrated) and clipped to the window bounds.
     """
-    if len(t) == 1:
-        return np.zeros(1)
-    dt = np.diff(t)
-    nominal = float(np.median(dt))
-    hold = np.append(dt, nominal)
-    hold = np.minimum(hold, MAX_SAMPLE_HOLD_INTERVALS * nominal)
-    return np.clip(np.minimum(hold, end_s - t), 0.0, None)
+    hold = np.append(np.diff(t), nominal_dt)
+    hold = np.minimum(hold, MAX_SAMPLE_HOLD_INTERVALS * nominal_dt)
+    return np.clip(np.minimum(t + hold, end_s) - np.maximum(t, start_s), 0.0, None)
 
 
 def find_exceedance(
-    channel: Channel, limit: str, limit_value: float, bound: str, end_s: Optional[float] = None
+    channel: Channel,
+    limit: str,
+    limit_value: float,
+    bound: str,
+    start_s: Optional[float] = None,
+    end_s: Optional[float] = None,
 ) -> Optional[Exceedance]:
-    """Exceedance of ``limit_value`` in an already-windowed channel, or None."""
-    outside = channel.values > limit_value if bound == "max" else channel.values < limit_value
-    if not outside.any():
+    """
+    Exceedance of ``limit_value`` within [start_s, end_s] (default: the whole
+    channel), or None. The last sample before start_s is included because its
+    held value may extend into the window; its time is clipped to start_s.
+    """
+    if len(channel) == 0:
         return None
+    if start_s is None:
+        start_s = float(channel.t[0])
     if end_s is None:
         end_s = float(channel.t[-1])
-    peak = float(channel.values[outside].max() if bound == "max" else channel.values[outside].min())
-    seconds_outside = float(_sample_durations(channel.t, end_s)[outside].sum())
-    first = float(channel.t[np.argmax(outside)])
+    selected = (channel.t >= start_s) & (channel.t <= end_s)
+    before = np.flatnonzero(channel.t < start_s)
+    if len(before):
+        selected[before[-1]] = True
+    t, values = channel.t[selected], channel.values[selected]
+    if len(t) == 0:
+        return None
+    nominal_dt = float(np.median(np.diff(channel.t))) if len(channel) > 1 else 0.0
+    durations = _sample_durations(t, nominal_dt, start_s, end_s)
+    outside = values > limit_value if bound == "max" else values < limit_value
+    outside &= (t >= start_s) | (durations > 0.0)
+    if not outside.any():
+        return None
+    peak = float(values[outside].max() if bound == "max" else values[outside].min())
+    seconds_outside = float(durations[outside].sum())
+    first = max(float(t[np.argmax(outside)]), start_s)
     return Exceedance(limit, limit_value, peak, seconds_outside, first)
 
 
@@ -484,12 +503,13 @@ def reduce_test_point(test_point: TestPoint, log: FlightLog) -> TestPointResult:
     limit_not_evaluated = False
     for limit, limit_value in test_point.limits().items():
         channel_key, bound = LIMIT_CHANNELS[limit]
-        channel = windowed[channel_key]
-        if channel is None:
+        if windowed[channel_key] is None:
             limit_not_evaluated = True
             result.notes.append(f"limit {limit}={limit_value:g} not evaluated: no {CHANNEL_LABELS[channel_key]} data")
             continue
-        exceedance = find_exceedance(channel, limit, limit_value, bound, test_point.end_s)
+        exceedance = find_exceedance(
+            log.channels[channel_key], limit, limit_value, bound, test_point.start_s, test_point.end_s
+        )
         if exceedance is not None:
             result.exceedances.append(exceedance)
 
