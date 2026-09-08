@@ -731,6 +731,58 @@
                             "description": "Reduce throttle!"
                         }
                     }
+                },
+                "flight_envelope_channel_t": {
+                    "type": "uint8_t",
+                    "description": "Flight-test envelope monitor channel",
+                    "entries": {
+                        "0": {
+                            "name": "load_factor_high",
+                            "description": "Load factor upper limit"
+                        },
+                        "1": {
+                            "name": "load_factor_low",
+                            "description": "Load factor lower limit"
+                        },
+                        "2": {
+                            "name": "airspeed",
+                            "description": "Airspeed (VNE)"
+                        },
+                        "3": {
+                            "name": "altitude_high",
+                            "description": "Altitude ceiling"
+                        },
+                        "4": {
+                            "name": "altitude_low",
+                            "description": "Altitude floor"
+                        },
+                        "5": {
+                            "name": "sink_rate",
+                            "description": "Sink rate"
+                        },
+                        "6": {
+                            "name": "angle_of_attack",
+                            "description": "Angle of attack"
+                        }
+                    }
+                },
+                "flight_envelope_state_t": {
+                    "type": "uint8_t",
+                    "description": "Flight-test envelope monitor channel state",
+                    "entries": {
+                        "0": {
+                            "name": "nominal",
+                            "description": "Nominal"
+                        },
+                        "1": {
+                            "name": "warning",
+                            "description": "Warning"
+                        },
+                        "2": {
+                            "name": "critical",
+                            "description": "Critical"
+                        }
+                    }
                 }
             },
             "navigation_mode_groups": {

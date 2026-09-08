@@ -1,0 +1,5 @@
+menuconfig MODULES_FLIGHT_ENVELOPE_MONITOR
+	bool "flight_envelope_monitor"
+	default n
+	---help---
+		Enable support for the advisory flight-test envelope monitor

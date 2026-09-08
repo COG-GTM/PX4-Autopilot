@@ -1,0 +1,273 @@
+module_name: flight_envelope_monitor
+parameters:
+- group: Flight Envelope Monitor
+  definitions:
+    FEM_EN:
+      description:
+        short: Enable the flight-test envelope monitor
+        long: |-
+          Starts the advisory flight-test envelope monitor at boot. The monitor
+          compares load factor, airspeed, altitude and sink rate against the
+          FEM_* limits while armed and airborne, publishes flight_envelope_status
+          and reports limit exceedances as events. It does not take any action
+          on the vehicle.
+      type: boolean
+      default: 0
+      reboot_required: true
+    FEM_CHAN_EN:
+      description:
+        short: Monitored envelope channels
+        long: |-
+          Selects which limits are evaluated. Channels whose limits are not
+          applicable to the current test point can be disabled here without
+          changing the limit values.
+      type: bitmask
+      bit:
+        0: Load factor upper limit (FEM_NZ_MAX_*)
+        1: Load factor lower limit (FEM_NZ_MIN_*)
+        2: Airspeed VNE (FEM_VNE_*)
+        3: Altitude ceiling (FEM_ALT_MAX_*)
+        4: Altitude floor (FEM_ALT_MIN_*)
+        5: Sink rate (FEM_SINK_*)
+      default: 39
+      min: 0
+      max: 63
+    FEM_ALT_SRC:
+      description:
+        short: Altitude source for the ceiling and floor limits
+        long: |-
+          Selects the altitude AMSL used for the altitude channels. The estimator
+          altitude comes from vehicle_local_position (ref_alt - z), the barometric
+          altitude from vehicle_air_data. Vertical speed always comes from the
+          estimator.
+      type: enum
+      values:
+        0: Estimator altitude
+        1: Barometric altitude
+      default: 0
+    FEM_DEBOUNCE:
+      description:
+        short: Envelope debounce time
+        long: |-
+          Time a new channel state (warning, critical or recovered) has to
+          persist before it is latched and reported. Suppresses single noisy
+          samples.
+      type: float
+      default: 0.2
+      min: 0.0
+      max: 5.0
+      unit: s
+      decimal: 2
+      increment: 0.05
+    FEM_NZ_MAX_WARN:
+      description:
+        short: Load factor upper warning limit
+        long: |-
+          Normal load factor Nz above which the load factor channel enters the
+          warning state. Nz is +1 g in steady level flight.
+      type: float
+      default: 3.0
+      min: 1.0
+      max: 20.0
+      unit: g0
+      decimal: 2
+      increment: 0.1
+    FEM_NZ_MAX_CRIT:
+      description:
+        short: Load factor upper critical limit
+        long: |-
+          Normal load factor Nz above which the load factor channel enters the
+          critical state. Must be greater than or equal to FEM_NZ_MAX_WARN,
+          otherwise the channel is disabled.
+      type: float
+      default: 3.8
+      min: 1.0
+      max: 20.0
+      unit: g0
+      decimal: 2
+      increment: 0.1
+    FEM_NZ_MIN_WARN:
+      description:
+        short: Load factor lower warning limit
+        long: |-
+          Normal load factor Nz below which the negative load factor channel
+          enters the warning state.
+      type: float
+      default: -0.5
+      min: -10.0
+      max: 1.0
+      unit: g0
+      decimal: 2
+      increment: 0.1
+    FEM_NZ_MIN_CRIT:
+      description:
+        short: Load factor lower critical limit
+        long: |-
+          Normal load factor Nz below which the negative load factor channel
+          enters the critical state. Must be less than or equal to
+          FEM_NZ_MIN_WARN, otherwise the channel is disabled.
+      type: float
+      default: -1.5
+      min: -10.0
+      max: 1.0
+      unit: g0
+      decimal: 2
+      increment: 0.1
+    FEM_NZ_HYST:
+      description:
+        short: Load factor hysteresis band
+        long: |-
+          The load factor has to move back inside the limit by this amount before
+          a load factor channel de-escalates.
+      type: float
+      default: 0.1
+      min: 0.0
+      max: 5.0
+      unit: g0
+      decimal: 2
+      increment: 0.05
+    FEM_VNE_WARN:
+      description:
+        short: Airspeed warning limit
+        long: |-
+          Calibrated airspeed above which the airspeed channel enters the
+          warning state.
+      type: float
+      default: 30.0
+      min: 0.0
+      max: 200.0
+      unit: m/s
+      decimal: 1
+      increment: 0.5
+    FEM_VNE_CRIT:
+      description:
+        short: Airspeed critical limit (VNE)
+        long: |-
+          Calibrated airspeed above which the airspeed channel enters the
+          critical state. Must be greater than or equal to FEM_VNE_WARN,
+          otherwise the channel is disabled.
+      type: float
+      default: 35.0
+      min: 0.0
+      max: 200.0
+      unit: m/s
+      decimal: 1
+      increment: 0.5
+    FEM_VNE_HYST:
+      description:
+        short: Airspeed hysteresis band
+        long: |-
+          The airspeed has to drop below the limit by this amount before the
+          airspeed channel de-escalates.
+      type: float
+      default: 1.0
+      min: 0.0
+      max: 20.0
+      unit: m/s
+      decimal: 1
+      increment: 0.5
+    FEM_ALT_MAX_WARN:
+      description:
+        short: Altitude ceiling warning limit
+        long: |-
+          Altitude AMSL above which the ceiling channel enters the warning state.
+      type: float
+      default: 3000.0
+      min: -500.0
+      max: 20000.0
+      unit: m
+      decimal: 0
+      increment: 10.0
+    FEM_ALT_MAX_CRIT:
+      description:
+        short: Altitude ceiling critical limit
+        long: |-
+          Altitude AMSL above which the ceiling channel enters the critical
+          state. Must be greater than or equal to FEM_ALT_MAX_WARN, otherwise
+          the channel is disabled.
+      type: float
+      default: 3300.0
+      min: -500.0
+      max: 20000.0
+      unit: m
+      decimal: 0
+      increment: 10.0
+    FEM_ALT_MIN_WARN:
+      description:
+        short: Altitude floor warning limit
+        long: |-
+          Altitude AMSL below which the floor channel enters the warning state.
+      type: float
+      default: 100.0
+      min: -500.0
+      max: 20000.0
+      unit: m
+      decimal: 0
+      increment: 10.0
+    FEM_ALT_MIN_CRIT:
+      description:
+        short: Altitude floor critical limit
+        long: |-
+          Altitude AMSL below which the floor channel enters the critical state.
+          Must be less than or equal to FEM_ALT_MIN_WARN, otherwise the channel
+          is disabled.
+      type: float
+      default: 50.0
+      min: -500.0
+      max: 20000.0
+      unit: m
+      decimal: 0
+      increment: 10.0
+    FEM_ALT_HYST:
+      description:
+        short: Altitude hysteresis band
+        long: |-
+          The altitude has to move back inside the limit by this amount before an
+          altitude channel de-escalates.
+      type: float
+      default: 10.0
+      min: 0.0
+      max: 500.0
+      unit: m
+      decimal: 0
+      increment: 1.0
+    FEM_SINK_WARN:
+      description:
+        short: Sink rate warning limit
+        long: |-
+          Descent rate (positive down) above which the sink rate channel enters
+          the warning state.
+      type: float
+      default: 5.0
+      min: 0.0
+      max: 100.0
+      unit: m/s
+      decimal: 1
+      increment: 0.5
+    FEM_SINK_CRIT:
+      description:
+        short: Sink rate critical limit
+        long: |-
+          Descent rate (positive down) above which the sink rate channel enters
+          the critical state. Must be greater than or equal to FEM_SINK_WARN,
+          otherwise the channel is disabled.
+      type: float
+      default: 8.0
+      min: 0.0
+      max: 100.0
+      unit: m/s
+      decimal: 1
+      increment: 0.5
+    FEM_SINK_HYST:
+      description:
+        short: Sink rate hysteresis band
+        long: |-
+          The sink rate has to drop below the limit by this amount before the
+          sink rate channel de-escalates.
+      type: float
+      default: 0.5
+      min: 0.0
+      max: 20.0
+      unit: m/s
+      decimal: 1
+      increment: 0.1
