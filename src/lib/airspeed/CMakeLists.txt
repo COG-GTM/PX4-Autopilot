@@ -33,3 +33,5 @@
 
 px4_add_library(airspeed airspeed.cpp)
 target_link_libraries(airspeed PRIVATE atmosphere)
+
+px4_add_unit_gtest(SRC AirspeedTest.cpp LINKLIBS airspeed)
